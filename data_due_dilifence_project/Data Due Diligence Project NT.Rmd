@@ -1,0 +1,106 @@
+---
+title: "Data Due Diligence Project"
+author: "Nelson Tran"
+date: "2024-04-08"
+output: pdf_document
+---
+
+```{r}
+data <- read.csv("./Customer_Dataset_Data_OG.csv",
+                 na.strings = "NA",
+                 stringsAsFactors = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(tidytuesdayR)
+```
+
+
+```{r}
+summary(data)
+```
+
+```{r}
+data <- data %>% mutate(CardSpendMonth = parse_number(CardSpendMonth))
+data <- data %>% mutate(HHIncome = parse_number(HHIncome))
+data <- data %>% mutate(CarValue = parse_number(CarValue))
+data <- data %>% mutate(VoiceOverTenure = parse_number(VoiceOverTenure))
+data <- data %>% mutate(DataOverTenure = parse_number(DataOverTenure))
+
+data[is.na(data)] <- 0
+```
+
+```{r}
+#Demographic-related Variables
+#Region of customer written out (Var1)
+data <- mutate(data,
+               GeoRegion = case_when(
+                 Region == 1 ~ "NorthEast",
+                 Region == 2 ~ "Midwest",
+                 Region == 3 ~ "West",
+                 Region == 4 ~ "Southwest",
+                 Region == 5 ~ "Southeast",
+                 TRUE ~ NA_character_
+               ))
+
+#Creating Age groups (Var2)
+age_intervals <- c(0, 18, 37, 55, Inf)
+age_labels <- c("Young Adults", "Young Adults", "Middle Age", "Older Adults")
+data$AgeGroup <- cut(data$Age, breaks = age_intervals, labels = age_labels, right = FALSE)
+
+#total number other pets owned (Var3)
+data$OtherPets <- data$NumberPets-(data$NumberBirds+
+                                     data$NumberCats+
+                                     data$NumberDogs)
+
+#If a customer voted or not in certain regions (Var4)
+data <- mutate(data,
+               RegionVotingStatus = case_when(
+                 Votes == "Yes" & Region == 1 ~ "NorthEast_Voted",
+                 Votes == "No" & Region == 1 ~ "NorthEast_NotVoted",
+                 Votes == "Yes" & Region == 2 ~ "Midwest_Voted",
+                 Votes == "No" & Region == 2 ~ "Midwest_NotVoted",
+                 Votes == "Yes" & Region == 3 ~ "West_Voted",
+                 Votes == "No" & Region == 3 ~ "West_NotVoted",
+                 Votes == "Yes" & Region == 4 ~ "Southwest_Voted",
+                 Votes == "No" & Region == 4 ~ "Southwest_NotVoted",
+                 Votes == "Yes" & Region == 5 ~ "Southeast_Voted",
+                 Votes == "No" & Region == 5 ~ "Southeast_NotVoted",
+               ))
+
+#Town Size rewritten (Var5)
+data <- mutate(data,
+               TownSizeGroup = case_when(
+                 TownSize == 1 ~ "Very Large",
+                 TownSize == 2 ~ "Large",
+                 TownSize == 3 ~ "Medium",
+                 TownSize == 4 ~ "Small",
+                 TownSize == 5 ~ "Very Small",
+                 TRUE ~ NA_character_
+               ))
+
+#TV watchers based on PC owning (Var10)
+data <- mutate(data,
+               TVWatchersWithoutPC = ifelse(TVWatchingHours > 15 & OwnsPC == "No", "Yes", "No"))
+
+#Financial-related Variables
+#Total debts of customers(Var6)
+data$totaldebt <- data$CreditDebt + data$OtherDebt
+
+#Average Cost of Items on Credit Cards (Var7)
+data$avgcostitem <- data$CardSpendMonth/data$CardItemsMonthly
+
+#Ratio of car value to HHincome (Var8)
+data$CartoIncome <- data$CarValue/data$HHIncome
+
+#avg monthly phone bill voice and data (Var9)
+data$MonthlyPhoneBill <- (data$DataOverTenure+data$VoiceOverTenure/
+                            data$PhoneCoTenure)
+
+```
+
+```{r}
+write.csv(data, file = "Customer_Dataset_Data.csv")
+```
