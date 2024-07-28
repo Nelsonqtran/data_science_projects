@@ -1,0 +1,349 @@
+---
+title: "DSE6211 Preliminary Results"
+author: "Nelson Tran"
+date: "2024-02-12"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+Loading libraries that may be used.
+```{r}
+library(lubridate)
+library(reticulate)
+library(keras)
+library(tensorflow)
+library(tidymodels)
+library(caret)
+library(MESS)
+```
+
+Data cleaning
+```{r}
+data <- read.csv("./project_data.csv", header = TRUE)
+
+#removing Booking ID column from our data.
+data <- subset(data, select = -c(0,1))
+
+#seeing the length of each room type reserved
+table(data$room_type_reserved)
+#From the table, we can see that 'room_type1' is largely abundant compared to the other rooms.
+#turning this variable into a factor  'room_type1" and 'other
+room_type <- data %>%
+  group_by(room_type_reserved) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count)) %>%
+  select(room_type_reserved) %>%
+  top_n(-1)
+data$room_type_reserved <- ifelse(data$room_type_reserved %in% room_type$room_type_reserved,
+                                  data$room_type_reserved,
+                                  "other")
+unique(data$room_type_reserved)
+```
+```{r}
+unique(data$type_of_meal_plan)
+unique(data$market_segment_type)
+#I will leave 'type_of_meal_plan' and 'market_segment_type' as is but will still need to convert to a factor
+```
+```{r}
+#Converting dates from "arrival_date" to seasons
+data2 <- data
+data2 <- data.frame(
+  arrival_date = seq(as.Date("2017-01-01"), as.Date("2018-12-31"), by = "days")
+)
+get_season <- function(month) {
+  case_when(
+    month %in% 3:5 ~ "Spring",
+    month %in% 6:8 ~ "Summer",
+    month %in% 9:11 ~ "Fall",
+    TRUE ~ "Winter"
+  )
+}
+data2 <- data2 %>%
+  mutate(month = month(arrival_date),
+         season = get_season(month))
+data <- data %>%
+  mutate(arrival_date = get_season(month(arrival_date)))
+
+unique(data$arrival_date)
+```
+
+Character variables will be changed to factors
+```{r}
+data$type_of_meal_plan <- factor(data$type_of_meal_plan)
+data$room_type_reserved <- factor(data$room_type_reserved)
+data$arrival_date <- factor(data$arrival_date)
+data$market_segment_type <- factor(data$market_segment_type)
+#cancelled is = 1, not_cancelled = 0
+data$booking_status <- as.integer(data$booking_status == "canceled")
+```
+
+Onehot_encoder
+```{r}
+training_ind <- createDataPartition(data$booking_status,
+                                    p = 0.75,
+                                    list = FALSE,
+                                    times = 1)
+training_set <- data[training_ind,]
+test_set <- data[-training_ind,]
+
+onehot_encoder <- dummyVars(~ type_of_meal_plan + room_type_reserved +
+                                arrival_date + market_segment_type,
+                              training_set[, c("type_of_meal_plan", "room_type_reserved",
+                                                 "arrival_date", "market_segment_type")],
+                              levelsOnly = TRUE,
+                              fullRank = TRUE)
+
+onehot_enc_training <- predict(onehot_encoder,
+                                 training_set[, c("type_of_meal_plan", "room_type_reserved",
+                                                 "arrival_date", "market_segment_type")])
+
+training_set <- cbind(training_set, onehot_enc_training)
+
+onehot_encoder <- dummyVars(~ type_of_meal_plan + room_type_reserved +
+                                arrival_date + market_segment_type,
+                              test_set[, c("type_of_meal_plan", "room_type_reserved",
+                                                 "arrival_date", "market_segment_type")],
+                              levelsOnly = TRUE,
+                              fullRank = TRUE)
+
+onehot_enc_test <- predict(onehot_encoder,
+                                 test_set[, c("type_of_meal_plan", "room_type_reserved",
+                                                 "arrival_date", "market_segment_type")])
+
+test_set <- cbind(test_set, onehot_enc_test)
+
+cols_to_exclude <- c(5,7,9,10,16)
+
+test_set[, -(cols_to_exclude)] <- scale(test_set[, -c(cols_to_exclude)],
+                              center = apply(training_set[, -c(cols_to_exclude)], 2, mean),
+                              scale = apply(training_set[, -c(cols_to_exclude)], 2, sd))
+training_set[, -c(cols_to_exclude)] <- scale(training_set[, -c(cols_to_exclude)])
+
+training_features <- array(data = unlist(training_set[, -c(cols_to_exclude)]),
+                                         dim = c(nrow(training_set), 27))
+training_labels <- array(data = unlist(training_set[, 16]),
+                         dim = c(nrow(training_set)))
+
+test_features <- array(data = unlist(test_set[, -c(cols_to_exclude)]),
+                       dim = c(nrow(test_set), 27))
+test_labels <- array(data = unlist(test_set[, 16]),
+                     dim = c(nrow(test_set)))
+
+
+```
+
+Loading our environment
+```{r}
+use_virtualenv("my_tf_workspace")
+```
+
+Testing different architectures to see which one will fit the best.
+
+Model_4 (75 units, 50 units, 25 units respectively)
+```{r}
+model_4 <- keras_model_sequential(list(
+  layer_dense(units = 75, activation = "relu"),
+  layer_dense(units = 50, activation = "relu"),
+  layer_dense(units = 25, activation = "relu"),  
+  layer_dense(units = 1, activation = "sigmoid")
+))
+compile(model_4,
+        optimizer = "rmsprop",
+        loss = "binary_crossentropy",
+        metrics = "accuracy")
+
+early_stopping <- callback_early_stopping(patience = 5)
+
+history_4 <- fit(model_4, training_features, training_labels,
+               epochs = 50, batch_size = 512, validation_split = 0.33,
+               callbacks = list(early_stopping))
+plot(history_4)
+```
+```{r}
+model_5 <- keras_model_sequential(list(
+  layer_dense(units = 1000, activation = "relu"),
+  layer_dense(units = 500, activation = "relu"),
+  layer_dense(units = 250, activation = "relu"),
+  layer_dense(units = 100, activation = "relu"),
+  layer_dense(units = 1, activation = "sigmoid")
+))
+compile(model_5,
+        optimizer = "rmsprop",
+        loss = "binary_crossentropy",
+        metrics = "accuracy")
+
+early_stopping <- callback_early_stopping(patience = 5)
+
+history_5 <- fit(model_5, training_features, training_labels,
+               epochs = 50, batch_size = 512, validation_split = 0.33,
+               callbacks = list(early_stopping))
+plot(history_5)
+```
+
+```{r}
+model_6 <- keras_model_sequential(list(
+  layer_dense(units = 1000, activation = "relu"),
+  layer_dense(units = 500, activation = "relu"),
+  layer_dense(units = 100, activation = "relu"),
+  layer_dense(units = 1, activation = "sigmoid")
+))
+compile(model_6,
+        optimizer = "rmsprop",
+        loss = "binary_crossentropy",
+        metrics = "accuracy")
+
+early_stopping <- callback_early_stopping(patience = 5)
+
+history_6 <- fit(model_6, training_features, training_labels,
+               epochs = 50, batch_size = 512, validation_split = 0.33,
+               callbacks = list(early_stopping))
+plot(history_6)
+```
+ROC curves for each model
+
+model_4
+```{r}
+predictions_4 <- predict(model_4, test_features)
+test_set_4 <- test_set
+test_set_4$p_prob <- predictions_4[,1]
+over_threshold <- test_set_4[test_set_4$p_prob >= 0.5,]
+
+roc_data_4 <- data.frame(threshold=seq(1,0,-0.01), fpr=0, tpr=0)
+for (i in roc_data_4$threshold) {
+  over_threshold <- test_set_4[test_set_4$p_prob >= i, ]
+  fpr <- sum(over_threshold$booking_status==0)/sum(test_set_4$booking_status==0)
+  roc_data_4[roc_data_4$threshold==i, "fpr"] <- fpr
+  
+  tpr <- sum(over_threshold$booking_status==1)/sum(test_set_4$booking_status==1)
+  roc_data_4[roc_data_4$threshold==i, "tpr"] <- tpr
+}
+
+ggplot() +
+  geom_line(data = roc_data_4, aes(x = fpr, y = tpr, color = threshold) , linewidth = 2) +
+  scale_color_gradientn(colors = rainbow(3)) +
+  geom_abline(intercept = 0, slope = 1, lty = 2) +
+  geom_point(data = roc_data_4[seq(1, 101, 10), ], aes(x = fpr, y = tpr)) +
+  geom_text(data = roc_data_4[seq(1, 101, 10), ],
+            aes(x = fpr, y = tpr, label = threshold, hjust = 1.2 , vjust = -0.2))
+```
+model_5
+```{r}
+predictions_5 <- predict(model_5, test_features)
+test_set_5 <- test_set
+test_set_5$p_prob <- predictions_5[,1]
+over_threshold <- test_set_5[test_set_5$p_prob >= 0.5,]
+
+roc_data_5 <- data.frame(threshold=seq(1,0,-0.01), fpr=0, tpr=0)
+for (i in roc_data_5$threshold) {
+  over_threshold <- test_set_5[test_set_5$p_prob >= i, ]
+  fpr <- sum(over_threshold$booking_status==0)/sum(test_set_5$booking_status==0)
+  roc_data_5[roc_data_5$threshold==i, "fpr"] <- fpr
+  
+  tpr <- sum(over_threshold$booking_status==1)/sum(test_set_5$booking_status==1)
+  roc_data_5[roc_data_5$threshold==i, "tpr"] <- tpr
+}
+
+ggplot() +
+  geom_line(data = roc_data_5, aes(x = fpr, y = tpr, color = threshold) , linewidth = 2) +
+  scale_color_gradientn(colors = rainbow(3)) +
+  geom_abline(intercept = 0, slope = 1, lty = 2) +
+  geom_point(data = roc_data_5[seq(1, 101, 10), ], aes(x = fpr, y = tpr)) +
+  geom_text(data = roc_data_5[seq(1, 101, 10), ],
+            aes(x = fpr, y = tpr, label = threshold, hjust = 1.2 , vjust = -0.2))
+```
+model_6
+```{r}
+predictions_6 <- predict(model_6, test_features)
+test_set_6 <- test_set
+test_set_6$p_prob <- predictions_6[,1]
+over_threshold <- test_set_6[test_set_6$p_prob >= 0.5,]
+
+roc_data_6 <- data.frame(threshold=seq(1,0,-0.01), fpr=0, tpr=0)
+for (i in roc_data_6$threshold) {
+  over_threshold <- test_set_6[test_set_6$p_prob >= i, ]
+  fpr <- sum(over_threshold$booking_status==0)/sum(test_set_6$booking_status==0)
+  roc_data_6[roc_data_6$threshold==i, "fpr"] <- fpr
+  
+  tpr <- sum(over_threshold$booking_status==1)/sum(test_set_6$booking_status==1)
+  roc_data_6[roc_data_6$threshold==i, "tpr"] <- tpr
+}
+
+ggplot() +
+  geom_line(data = roc_data_6, aes(x = fpr, y = tpr, color = threshold) , linewidth = 2) +
+  scale_color_gradientn(colors = rainbow(3)) +
+  geom_abline(intercept = 0, slope = 1, lty = 2) +
+  geom_point(data = roc_data_6[seq(1, 101, 10), ], aes(x = fpr, y = tpr)) +
+  geom_text(data = roc_data_6[seq(1, 101, 10), ],
+            aes(x = fpr, y = tpr, label = threshold, hjust = 1.2 , vjust = -0.2))
+```
+AUC for each model
+
+Model_4 AUC
+```{r}
+auc_4 <- auc(x = roc_data_4$fpr, y = roc_data_4$tpr, type = "spline")
+auc_4
+```
+Model_5
+```{r}
+auc_5 <- auc(x = roc_data_5$fpr, y = roc_data_5$tpr, type = "spline")
+auc_5
+```
+Model_6
+```{r}
+auc_6 <- auc(x = roc_data_6$fpr, y = roc_data_6$tpr, type = "spline")
+auc_6
+```
+
+Calibration Curves for each model
+
+Model_4
+```{r}
+calibration_data_4 <- data.frame(bin_midpoint = seq(0.05, 0.95, 0.1),
+                                 observed_event_percentage = 0)
+for(i in seq(0.05, 0.95, 0.1)) {
+  in_interval <- test_set_4[test_set_4$p_prob >= (i-0.05) & test_set_4$p_prob <= (i + 0.05), ]
+  oep <- nrow(in_interval[in_interval$booking_status==1, ])/nrow(in_interval)
+  calibration_data_4[calibration_data_4$bin_midpoint==i, "observed_event_percentage"] <- oep
+}
+
+ggplot(data = calibration_data_4, aes(x = bin_midpoint, y = observed_event_percentage)) +
+  geom_line() +
+  geom_abline(intercept = 0, slope = 1, lty = 2) +
+  geom_point(size = 2) +
+  geom_text(aes(label = bin_midpoint), hjust = 0.75, vjust = -0.5)
+```
+
+model_5
+```{r}
+calibration_data_5 <- data.frame(bin_midpoint = seq(0.05, 0.95, 0.1),
+                                 observed_event_percentage = 0)
+for(i in seq(0.05, 0.95, 0.1)) {
+  in_interval <- test_set_5[test_set_5$p_prob >= (i-0.05) & test_set_5$p_prob <= (i + 0.05), ]
+  oep <- nrow(in_interval[in_interval$booking_status==1, ])/nrow(in_interval)
+  calibration_data_5[calibration_data_5$bin_midpoint==i, "observed_event_percentage"] <- oep
+}
+
+ggplot(data = calibration_data_5, aes(x = bin_midpoint, y = observed_event_percentage)) +
+  geom_line() +
+  geom_abline(intercept = 0, slope = 1, lty = 2) +
+  geom_point(size = 2) +
+  geom_text(aes(label = bin_midpoint), hjust = 0.75, vjust = -0.5)
+```
+
+model_6
+```{r}
+calibration_data_6 <- data.frame(bin_midpoint = seq(0.05, 0.95, 0.1),
+                                 observed_event_percentage = 0)
+for(i in seq(0.05, 0.95, 0.1)) {
+  in_interval <- test_set_6[test_set_6$p_prob >= (i-0.05) & test_set_6$p_prob <= (i + 0.05), ]
+  oep <- nrow(in_interval[in_interval$booking_status==1, ])/nrow(in_interval)
+  calibration_data_6[calibration_data_6$bin_midpoint==i, "observed_event_percentage"] <- oep
+}
+
+ggplot(data = calibration_data_6, aes(x = bin_midpoint, y = observed_event_percentage)) +
+  geom_line() +
+  geom_abline(intercept = 0, slope = 1, lty = 2) +
+  geom_point(size = 2) +
+  geom_text(aes(label = bin_midpoint), hjust = 0.75, vjust = -0.5)
+```

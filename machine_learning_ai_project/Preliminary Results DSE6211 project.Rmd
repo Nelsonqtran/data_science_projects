@@ -1,0 +1,227 @@
+---
+title: "DSE6211 Preliminary Results"
+author: "Nelson Tran"
+date: "2024-02-12"
+output:
+  pdf_document: default
+  word_document: default
+---
+
+Loading libraries that may be used.
+```{r}
+library(lubridate)
+library(reticulate)
+library(keras)
+library(tensorflow)
+library(tidymodels)
+library(caret)
+```
+
+Data cleaning
+```{r}
+data <- read.csv("./project_data.csv", header = TRUE)
+
+#removing Booking ID column from our data.
+data <- subset(data, select = -c(0,1))
+
+#seeing the length of each room type reserved
+table(data$room_type_reserved)
+#From the table, we can see that 'room_type1' is largely abundant compared to the other rooms.
+#turning this variable into a factor  'room_type1" and 'other
+room_type <- data %>%
+  group_by(room_type_reserved) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count)) %>%
+  select(room_type_reserved) %>%
+  top_n(-1)
+data$room_type_reserved <- ifelse(data$room_type_reserved %in% room_type$room_type_reserved,
+                                  data$room_type_reserved,
+                                  "other")
+unique(data$room_type_reserved)
+```
+```{r}
+unique(data$type_of_meal_plan)
+unique(data$market_segment_type)
+#I will leave 'type_of_meal_plan' and 'market_segment_type' as is but will still need to convert to a factor
+```
+```{r}
+#Converting dates from "arrival_date" to seasons
+data2 <- data
+data2 <- data.frame(
+  arrival_date = seq(as.Date("2017-01-01"), as.Date("2018-12-31"), by = "days")
+)
+get_season <- function(month) {
+  case_when(
+    month %in% 3:5 ~ "Spring",
+    month %in% 6:8 ~ "Summer",
+    month %in% 9:11 ~ "Fall",
+    TRUE ~ "Winter"
+  )
+}
+data2 <- data2 %>%
+  mutate(month = month(arrival_date),
+         season = get_season(month))
+data <- data %>%
+  mutate(arrival_date = get_season(month(arrival_date)))
+
+unique(data$arrival_date)
+```
+
+Character variables will be changed to factors
+```{r}
+data$type_of_meal_plan <- factor(data$type_of_meal_plan)
+data$room_type_reserved <- factor(data$room_type_reserved)
+data$arrival_date <- factor(data$arrival_date)
+data$market_segment_type <- factor(data$market_segment_type)
+#cancelled is = 1, not_cancelled = 0
+data$booking_status <- as.integer(data$booking_status == "canceled")
+```
+
+Onehot_encoder
+```{r}
+training_ind <- createDataPartition(data$booking_status,
+                                    p = 0.75,
+                                    list = FALSE,
+                                    times = 1)
+training_set <- data[training_ind,]
+test_set <- data[-training_ind,]
+
+onehot_encoder <- dummyVars(~ type_of_meal_plan + room_type_reserved +
+                                arrival_date + market_segment_type,
+                              training_set[, c("type_of_meal_plan", "room_type_reserved",
+                                                 "arrival_date", "market_segment_type")],
+                              levelsOnly = TRUE,
+                              fullRank = TRUE)
+
+onehot_enc_training <- predict(onehot_encoder,
+                                 training_set[, c("type_of_meal_plan", "room_type_reserved",
+                                                 "arrival_date", "market_segment_type")])
+
+training_set <- cbind(training_set, onehot_enc_training)
+
+onehot_encoder <- dummyVars(~ type_of_meal_plan + room_type_reserved +
+                                arrival_date + market_segment_type,
+                              test_set[, c("type_of_meal_plan", "room_type_reserved",
+                                                 "arrival_date", "market_segment_type")],
+                              levelsOnly = TRUE,
+                              fullRank = TRUE)
+
+onehot_enc_test <- predict(onehot_encoder,
+                                 test_set[, c("type_of_meal_plan", "room_type_reserved",
+                                                 "arrival_date", "market_segment_type")])
+
+test_set <- cbind(test_set, onehot_enc_test)
+
+cols_to_exclude <- c(5,7,9,10,16)
+
+test_set[, -(cols_to_exclude)] <- scale(test_set[, -c(cols_to_exclude)],
+                              center = apply(training_set[, -c(cols_to_exclude)], 2, mean),
+                              scale = apply(training_set[, -c(cols_to_exclude)], 2, sd))
+training_set[, -c(cols_to_exclude)] <- scale(training_set[, -c(cols_to_exclude)])
+
+training_features <- array(data = unlist(training_set[, -c(cols_to_exclude)]),
+                                         dim = c(nrow(training_set), 27))
+training_labels <- array(data = unlist(training_set[, 16]),
+                         dim = c(nrow(training_set)))
+
+test_features <- array(data = unlist(test_set[, -c(cols_to_exclude)]),
+                       dim = c(nrow(test_set), 27))
+test_labels <- array(data = unlist(test_set[, 16]),
+                     dim = c(nrow(test_set)))
+
+
+```
+
+Loading our environment
+```{r}
+use_virtualenv("my_tf_workspace")
+```
+
+Testing different architectures to see which one will fit the best.
+
+model_1 (10 units)
+```{r}
+model_1 <- keras_model_sequential(list(
+  layer_dense(units = 10, activation = "relu"),  
+  layer_dense(units = 1, activation = "sigmoid")
+))
+compile(model_1,
+        optimizer = "rmsprop",
+        loss = "binary_crossentropy",
+        metrics = "accuracy")
+
+history_1 <- fit(model_1, training_features, training_labels,
+               epochs = 50 , batch_size = 512, validation_split = 0.33)
+plot(history_1)
+```
+model_2 (20 units, 10 units respectively)
+```{r}
+model_2 <- keras_model_sequential(list(
+  layer_dense(units = 20, activation = "relu"),
+  layer_dense(units = 10, activation = "relu"),  
+  layer_dense(units = 1, activation = "sigmoid")
+))
+compile(model_2,
+        optimizer = "rmsprop",
+        loss = "binary_crossentropy",
+        metrics = "accuracy")
+
+history_2 <- fit(model_2, training_features, training_labels,
+               epochs = 50, batch_size = 512, validation_split = 0.33)
+plot(history_2)
+```
+model_3 (50 units, and 25 units respectively)
+```{r}
+model_3 <- keras_model_sequential(list(
+  layer_dense(units = 50, activation = "relu"),
+  layer_dense(units = 25, activation = "relu"),  
+  layer_dense(units = 1, activation = "sigmoid")
+))
+compile(model_3,
+        optimizer = "rmsprop",
+        loss = "binary_crossentropy",
+        metrics = "accuracy")
+
+history_3 <- fit(model_3, training_features, training_labels,
+               epochs = 50, batch_size = 512, validation_split = 0.33)
+plot(history_3)
+```
+Model_4 (75 units, 50 units, 25 units respectively)
+```{r}
+model_4 <- keras_model_sequential(list(
+  layer_dense(units = 75, activation = "relu"),
+  layer_dense(units = 50, activation = "relu"),
+  layer_dense(units = 25, activation = "relu"),  
+  layer_dense(units = 1, activation = "sigmoid")
+))
+compile(model_4,
+        optimizer = "rmsprop",
+        loss = "binary_crossentropy",
+        metrics = "accuracy")
+
+history_4 <- fit(model_4, training_features, training_labels,
+               epochs = 50, batch_size = 512, validation_split = 0.33)
+plot(history_4)
+```
+Aspects on the neural networks for why/how they were chosen
+
+number of layers: I wanted to see how adding and removing layers would affect how the neural network learns and it appears that 2 hidden layers gives the best results out of the models used above.
+
+number of units: Increasing the number of nodes in each layer also shows positive signs of improvement, although it seems like 50 and 25 nodes respectively is the sweet spot. Although this can be changed if needed during further testing.
+
+activation functions: For the hidden layers, we are using the "relu" function between it helps the network learn non-linear relationships. For the output layer, since we are dealing with a binary classification problem (0,1) we are using the sigmoid function.
+
+loss function: This is a binary problem so we will use "binary_crossentropy"
+
+optimizer: RMSprop seems like a good optimizer to use but after doing a tad bit of research, ADAM could be a possible choice of an optimizer as well.
+
+Comparing the learning curves with each other, I feel like there seems to be both underfitting models (1,2) and over fitting models (3,4). Based on this I think sticking with 2 hidden layers will be the best fit while keeping the units for each layer around 30.
+
+As there was already a scale added to the data, I think that possibly selecting the most important features could be beneficial to the networks. I can try and look for outliers that may have a negative impact to the overall model performance. Cross-validation and hyperparameter tuning which can include learning rates.
+
+
+
+
+What we can do to improve for final report
+
+Excellent work on the Preliminary Results, Nelson! Since all of the requirements for this assignment have been satisfied, the most important requirements to focus on for the Final Report are: -Try at least one additional dense feed-forward neural network with a different architecture. Try to obtain a model that is capable of overfitting (e.g., increase the number of hidden layers and/or units per hidden layer). Chapter 5 of the Deep Learning with R textbook covers several aspects of building deep learning models in practice. Section 5.3 is particular focused on improving the model fit using methods such as varying the number of units and layers. The reason we want to obtain a model that is capable of overfitting is because this model is flexible enough for the problem at hand. Then, we implement methods to prevent overfitting, such as early-stopping (i.e., stop at the epoch number where overfitting starts to occur), dropout, or regularization. -Evaluate and compare the dense feed-forward neural networks using ROC curves, AUC, and calibration curves. -Discuss the findings from the above analyses, as well as how the model will be used in practice. -Discuss future research/steps forward. The steps forward can include data that may be worthwhile including in future analyses. Please let me know if you have any questions! Best, Peter
