@@ -1,0 +1,610 @@
+---
+title: "DSE6111_final_project_nt"
+author: "Nelson Tran"
+date: "2023-12-09"
+output: word_document
+---
+
+```{r}
+library(ISLR2)
+library(MASS)
+library(class)
+library(e1071)
+library(boot)
+library(glmnet)
+library(pls)
+library(leaps)
+library(tree)
+library(randomForest)
+library(BART)
+library(dplyr)
+library(gbm)
+
+#Loading libraries and data needed
+#data used are already split into training and testing set
+#there is no need to split them
+hospital <- read.csv("./hospital_data.csv")
+hospital_dictionary <- read.csv("./hospital_data_dictionary.csv")
+#omitting any n/a values
+hospital <- na.omit(hospital)
+```
+
+```{r}
+hospital <- hospital %>%
+  mutate(Stay <- recode(Stay, '0-10' = 0, '11-20' = 0, '21-30' = 1,
+                        '31-40' = 1, '41-50' = 1, '51-60' =2,'61-70' = 2,
+                        '71-80' = 2, '81-90' = 2,'91-100' = 2,'>100' = 2))
+colnames(hospital)[19] <- "stay"
+hospital <- hospital[,-18]
+#splitting data into a 70/30 split
+#70% train, 30% test
+train <- sample(1:dim(hospital)[1], size=0.7*dim(hospital)[1])
+hos_train <- hospital[train, ]
+hos_test <- hospital[-train, ]
+
+table(hospital$stay)
+summary(hospital)
+```
+Numerical columns: Hospital_code, City_Code_Hospital, Available.Extra.Rooms.in.Hospital, Bed.Grade, City_Code_Patient, Visitors.with.Patient, and Admission_Deposit, stay
+
+Categorical Columns: Hospital_type_code, Hospital_region_code, Ward_Type, Ward_Facility_Code, Type of Admission, Severity of Illness, and, Age
+
+Quantitative Problem: -	Predicting hospitalization duration for patients.
+
+for multiple linear regression:
+we will assume for the t-test that H(o): B1 = 0 and H(A): B1 != 0
+rejecting the null hypothesis will tell if there is a statistically significant difference between the means of two variables
+
+we will assume for the p-value that H(o): p(value) > 0.05 and H(A): p-value < 0.05
+this will determine if a variable is statistically significant
+```{r}
+#Multiple Linear Regression
+hos_lm <- lm(stay ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_train)
+summary(hos_lm)
+lin_pred <- predict(hos_lm, hos_test)
+lin_MSE <- mean((lin_pred - hos_test$stay)^2)
+print(lin_MSE)
+```
+From the summary of the multiple linear regression, all variables used in this regression are statistically significant because their p-values are all below the null hypothesis which is 0.05. As for the t-test, each t-value does not equal 0 which means we can reject the null hypothesis for the t-value which means that there is a significant difference in size of the difference relative to the variation in your sample data. The test MSE for multiple linear regression is 0.4420886.
+
+```{r}
+#Best Subset Selection
+best_subset_train <- regsubsets(stay ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit,data = hos_train, nvmax = 7)
+subset_sum <- summary(best_subset_train)
+print(subset_sum)
+
+subset_sum$rsq
+
+par(mfrow = c(2,2))
+plot(subset_sum$adjr2, xlab = "Number of Variables",
+     ylab = "Adjr2", main = "Adjusted R-Squared")
+plot(subset_sum$bic, xlab = "Number of Variables",
+     ylab = "Adjr2", main = "BIC")
+plot(subset_sum$rss, xlab = "Number of Variables",
+     ylab = "Adjr2", main = "MSE")
+plot(subset_sum$cp, xlab = "Number of Variables",
+     ylab = "Adjr2", main = "CP")
+
+data.frame(
+  adj.r2 = which.max(subset_sum$adjr2),
+  cp = which.min(subset_sum$cp),
+  bic = which.min(subset_sum$bic)
+)
+#based on the lowest BIC value, the best model uses 7 variables
+```
+
+```{r}
+#forward and backward stepwise selection
+regfit_fwd <- regsubsets(stay ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_train, nvmax = 7,
+                     method = "forward")
+summary(regfit_fwd)
+regfit_bwd <- regsubsets(stay ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_train, nvmax = 7,
+                     method = "backward")
+summary(regfit_bwd)
+
+coef(regfit_fwd, 7)
+coef(regfit_bwd, 7)
+```
+
+```{r}
+set.seed(1)
+
+regfit.best <- regsubsets(stay ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_train, nvmax = 7)
+
+test.mat <- model.matrix(stay ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_train)
+
+val.errors <- rep(NA, 7)
+for (i in 1:7) {
+  coefi <- coef(regfit.best, id = i)
+  pred <- test.mat[, names(coef)] %*% coefi
+  val.errors[i] <- mean((hos_test$stay - pred)^2)
+}
+val.errors
+coef(regfit.best, 7)
+```
+```{r}
+#ridge regression
+#need to make a matrix first
+hos_train[is.na(hos_train)] <- 0
+hos_test[is.na(hos_test)] <- 0
+hospital[is.na(hospital)] <- 0
+set.seed(1)
+train_matrix <- model.matrix(stay ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_train)
+test_matrix <- model.matrix(stay ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_test)
+
+grid = 10^seq(10, -2, length = 100)
+
+ridge_cv <- cv.glmnet(train_matrix, hos_train[,'stay'], alpha = 0,
+                     lambda = grid)
+plot(ridge_cv)
+
+r_lambda_min <- ridge_cv$lambda.min
+print(r_lambda_min)
+
+coef(ridge_cv)
+
+ridge_cv <- cv.glmnet(train_matrix, hos_train[,'stay'], alpha = 0,
+                      lambda = grid)
+ridge_pred <- predict(ridge_cv, s = r_lambda_min, lambda = grid,
+                      alpha = 0, newx = test_matrix)
+ridge_MSE <- mean((ridge_pred - hos_test[,"stay"])^2)
+print(ridge_MSE)
+```
+Test MSE for Ridge Regression is .444018
+
+```{r}
+#Lasso Regression
+set.seed(1)
+
+lasso_cv <- cv.glmnet(train_matrix, hos_train[,"stay"],
+                      alpha = 1, lambda = grid)
+plot(lasso_cv)
+
+best_lambda_lasso <- lasso_cv$lambda.min
+print(best_lambda_lasso)
+
+coef(lasso_cv)
+
+lasso_pred <- predict(lasso_cv, s = best_lambda_lasso,
+                      lambda = grid, alpha = 1, newx = test_matrix)
+lasso_MSE <- mean((lasso_pred - hos_test[,"stay"])^2)
+print(lasso_MSE)
+```
+Lasso regression MSE is .4446472
+
+
+```{r}
+#Partial Least Squares
+set.seed(1)
+pls.fit <- plsr(stay ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_train, scale = TRUE,
+                validation = "CV")
+summary(pls.fit)
+validationplot(pls.fit, val.type = "MSEP")
+
+#Lowest cross-validation error occurs when M = 1 when PLS is used.
+pls.pred <- predict(pls.fit, hos_test, ncomp = 1)
+pls_MSE <- mean((pls.pred - hos_test[,"stay"])^2)
+print(pls_MSE)
+
+#performing PLS using the full data set using M=1
+#we can use this to compare to PCR
+pls.fit2 <- plsr(stay ~ ., data = hospital, scale = TRUE,
+                 ncomp = 1)
+summary(pls.fit2)
+```
+Test MSE for PLS is 0.4438446
+
+```{r}
+#regression tree
+reg_tree <- tree(stay ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_train)
+summary(reg_tree)
+plot(reg_tree)
+text(reg_tree, pretty = 0)
+
+reg_tree_hat <- predict(reg_tree, data = hos_test)
+reg_tree_MSE <- mean((reg_tree_hat - hos_test$stay)^2)
+print(reg_tree_MSE)
+```
+The test MSE for the regression tree is 0.559435
+
+```{r}
+#using cross validation to get the optimal level of tree complexity
+set.seed(1)
+cv_tree <- cv.tree(reg_tree)
+plot(cv_tree$size, cv_tree$dev, type = "b")
+
+#pruning tree to optimal level from graph
+#seems like optimal tree level is 4
+prune_hos <- prune.tree(reg_tree, best = 4)
+plot(prune_hos)
+text(prune_hos, pretty=0)
+
+#The pruned tree is the same as the regression tree
+#MSE of the pruned tree
+prune_tree_hat <- predict(prune_hos, data = hos_test)
+prune_tree_MSE <- mean((prune_tree_hat - hos_test$stay)^2)
+print(prune_tree_MSE)
+```
+As expected the pruned tree model's MSE is the same as the regression tree 0.559435.
+
+```{r}
+#bagging approach
+set.seed(1)
+bag_hos <- randomForest(stay ~ Visitors.with.Patient,
+                     data = hos_train, mtry = 1, ntree = 10,
+                     importance = TRUE)
+
+#MSE of the bagging approach
+bag_hos_hat <- predict(bag_hos, data = hos_test)
+bag_hos_MSE <- mean((bag_hos_hat - hos_test$stay)^2, na.rm = TRUE)
+print(bag_hos_MSE)
+```
+The bagging approach got a .5483819 as the test MSE
+
+```{r}
+#Random Forest Approach
+set.seed(1)
+rf_hos <- randomForest(stay ~  City_Code_Hospital, 
+                       data = hos_train, mtry = 1,
+                     importance = TRUE, ntree = 10)
+rf_hos_hat <- predict(rf_hos, data = hos_test)
+rf_MSE <- mean((rf_hos_hat - hos_test$stay)^2, na.rm = TRUE)
+print(rf_MSE)
+```
+The MSE for the random forest approach is 0.4902687
+
+```{r}
+#Boosting Approach
+set.seed(1)
+pow <- seq(-2,0,0.1)
+lambdas = 10^pow
+train_error <- rep(NA, length(lambdas))
+
+for (i in 1:length(lambdas)) {
+  boost_hos <- gbm(stay ~ Visitors.with.Patient, data = hos_train,
+                   distribution = "gaussian", n.trees = 500,
+                   shrinkage = lambdas[i])
+  #predicting the training error
+  boost_pred <- predict(boost_hos, hos_train, n.trees = 500)
+  train_error[i] <- mean((boost_pred - hos_train$stay)^2)
+}
+plot(lambdas, train_error, type = 'b',
+     xlab = "Shrinkage Values",
+     ylab = "Training MSE")
+```
+
+```{r}
+test_error <- rep(NA, length(lambdas))
+
+for (i in 1:length(lambdas)) {
+  boost_hos <- gbm(stay ~ Visitors.with.Patient, data = hos_test,
+                   distribution = "gaussian", n.trees = 500,
+                   shrinkage = lambdas[i])
+  #predicting the training error
+  boost_pred <- predict(boost_hos, hos_test, n.trees = 500)
+  test_error[i] <- mean((boost_pred - hos_test$stay)^2)
+}
+plot(lambdas, test_error, type = 'b',
+     xlab = "Shrinkage Values",
+     ylab = "Training MSE")
+```
+
+```{r}
+min(test_error)
+lambdas[which.min(test_error)]
+
+boost_hat <- predict(boost_hos, data = hos_test, n.trees=500)
+boost_MSE <- mean((boost_hat - hos_test$stay)^2)
+print(boost_MSE)
+```
+Using both methods to find the MSE, the test MSE for the Boosting method is about .5514
+
+Qualitative Response: - Predicting the Severity of an illness
+
+I will change each character variable to a factor to help with ease of applying the data set to models.
+```{r}
+hospital2 <- hospital
+hos_train2 <- hos_train
+hos_test2 <- hos_test
+
+hospital2$Hospital_type_code <- as.factor(hospital2$Hospital_type_code)
+hospital2$Hospital_region_code <- as.factor(hospital2$Hospital_region_code)
+hospital2$Department <- as.factor(hospital2$Department)
+hospital2$Ward_Type <- as.factor(hospital2$Ward_Type)
+hospital2$Ward_Facility_Code <- as.factor(hospital2$Ward_Facility_Code)
+hospital2$Type.of.Admission <- as.factor(hospital2$Type.of.Admission)
+hospital2$Severity.of.Illness <- as.factor(hospital2$Severity.of.Illness)
+hospital2$Age <- as.factor(hospital2$Age)
+
+hos_train2$Hospital_type_code <- as.factor(hos_train2$Hospital_type_code)
+hos_train2$Hospital_region_code <- as.factor(hos_train2$Hospital_region_code)
+hos_train2$Department <- as.factor(hos_train2$Department)
+hos_train2$Ward_Type <- as.factor(hos_train2$Ward_Type)
+hos_train2$Ward_Facility_Code <- as.factor(hos_train2$Ward_Facility_Code)
+hos_train2$Type.of.Admission <- as.factor(hos_train2$Type.of.Admission)
+hos_train2$Severity.of.Illness <- as.factor(hos_train2$Severity.of.Illness)
+hos_train2$Age <- as.factor(hos_train2$Age)
+
+hos_test2$Hospital_type_code <- as.factor(hos_test2$Hospital_type_code)
+hos_test2$Hospital_region_code <- as.factor(hos_test2$Hospital_region_code)
+hos_test2$Department <- as.factor(hos_test2$Department)
+hos_test2$Ward_Type <- as.factor(hos_test2$Ward_Type)
+hos_test2$Ward_Facility_Code <- as.factor(hos_test2$Ward_Facility_Code)
+hos_test2$Type.of.Admission <- as.factor(hos_test2$Type.of.Admission)
+hos_test2$Severity.of.Illness <- as.factor(hos_test2$Severity.of.Illness)
+hos_test2$Age <- as.factor(hos_test2$Age)
+
+```
+
+```{r}
+#KNN
+set.seed(1)
+train.set <- data.frame(hospital2[train,])
+test.set <- data.frame(hospital2[-train,])
+train.direction <- hospital2[train,]$Severity.of.Illness
+
+#knn.pred <- knn(train.set, test.set, train.direction, k=1)
+#knn.MSE <- mean(knn.pred==hospital2[!train, ]$direction)
+#print(knn.MSE)
+```
+I don't know why the K-nearest-neighbor did not work as I'm trying to get the Mean Squared error for this model. I had to change each variable from a character to factor then to a number. This might be why this model did not work but it was the only way for R to take my input.
+
+null hypothesis for p-value: H(o) > 0.05, H(A): < 0.05
+```{r}
+#Logistic Regression on training set
+hos_glm <- glm(Severity.of.Illness ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_train2, family = binomial)
+summary(hos_glm)
+
+hos_glm_prob <- predict(hos_glm, type = "response")
+hos_glm_pred <- rep("Wrong", length(hos_glm_prob))
+hos_glm_pred[hos_glm_prob>0.5] = "Correct"
+table(hos_glm_pred, hos_train2$Severity.of.Illness)
+```
+
+```{r}
+hos_glm_test <- glm(Severity.of.Illness ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_test2, family = binomial)
+summary(hos_glm)
+
+hos_glm_prob_test <- predict(hos_glm_test, type = "response")
+hos_glm_pred_test <- rep("Wrong", length(hos_glm_prob_test))
+hos_glm_pred_test[hos_glm_prob_test>0.5] = "Correct"
+table(hos_glm_pred_test, hos_test2$Severity.of.Illness)
+
+log_MSE <- mean(hos_glm_pred_test == hos_test2$Severity.of.Illness)
+print(log_MSE)
+```
+
+```{r}
+#LDA
+hos_lda <- lda(Severity.of.Illness ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_train2)
+hos_lda
+
+hos_lda2 <- lda(Severity.of.Illness ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_test2)
+hos_lda2
+
+lda_pred <- predict(hos_lda, hos_test2)
+names(lda_pred)
+lda_class <- lda_pred$class
+table(lda_class, hos_test2$Severity.of.Illness)
+lda_MSE <- mean(lda_class == hos_test2$Severity.of.Illness)
+print(lda_MSE)
+```
+probability of extreme severity of illness: 0.1771867
+probability of minor severity of illness: 0.2708046 
+probability of moderate severity of illness: 0.5520088 
+The mean for the LDA model is .5435743
+
+```{r}
+#QDA
+qda_fit <- qda(Severity.of.Illness ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_train2)
+qda_fit
+
+qda_fit2 <- qda(Severity.of.Illness ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_test2)
+qda_fit2
+
+qda_pred2 <- predict(qda_fit2, hos_test2)
+names(qda_pred2)
+qda_class2 <- qda_pred2$class
+table(qda_class2, hos_test2$Severity.of.Illness)
+qda_MSE <- mean(qda_class2 == hos_test2$Severity.of.Illness)
+print(qda_MSE)
+```
+probability of extreme severity of illness: 0.1771867 
+probability of minor severity of illness: 0.2708046 
+probability of moderate severity of illness: 0.5520088 
+The mean for the QDA model is 0.5415879
+
+```{r}
+#Classification trees
+tree_class <- tree(Severity.of.Illness ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_train2)
+summary(tree_class)
+plot(tree_class)
+text(tree_class, pretty = 0)
+
+tree_class2 <- tree(Severity.of.Illness ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, data = hos_test2)
+set.seed(2)
+tree_class_pred <- predict(tree_class2, data = hos_test2, type = 'class')
+table(tree_class_pred, hos_test2$Severity.of.Illness)
+class_tree_MSE <- .5617
+```
+(4105 + 0 + 48876)/(4105+594+3189+12575+24899+48776) = .5617
+The mean for the classification tree is .5617.
+
+```{r}
+#bagging approach qualitative
+
+set.seed(1)
+bag_qual <- randomForest(Severity.of.Illness ~ Hospital_code + City_Code_Hospital +
+                     Available.Extra.Rooms.in.Hospital + Bed.Grade +
+                     City_Code_Patient + Visitors.with.Patient + 
+                     Admission_Deposit, ntree=10,
+                     data = hos_train2, mtry = 7, importance = TRUE)
+bag_qual
+
+bag_qual_hat <- predict(bag_qual, data = hos_test2)
+bag_qual_hat <- na.omit(bag_qual_hat)
+bag_qual_MSE <- mean((bag_qual_hat - hos_test2$Severity.of.Illness)^2)
+print(bag_qual_MSE)
+```
+
+```{r}
+#random forest approach qualitative
+set.seed(1)
+rf_qual <- randomForest(Severity.of.Illness ~ Bed.Grade + Visitors.with.Patient + 
+                          Admission_Deposit, ntree=10,
+                        data = hos_train2, mtry = 3, importance = TRUE)
+rf_qual
+
+rf_qual_hat <- predict(rf_qual, data = hos_test2)
+rf_qual_hat <- na.omit(rf_qual_hat)
+rf_qual_MSE <- mean((rf_qual_hat - hos_test2$Severity.of.Illness)^2)
+print(rf_qual_MSE)
+any(is.na(hos_test2$rf_qual_hat))
+any(is.na(hos_test2$Severity.of.Illness))
+```
+
+Principal Components Regression: - Predict the length of stay in a hospital
+```{r}
+#ten-fold cross-validation error on the whole data set first
+set.seed(2)
+pcr_fit_whole <- pcr(stay ~ ., data = hospital2, scale = TRUE,
+               validation = "CV")
+summary(pcr_fit_whole)
+validationplot(pcr_fit_whole, val.type = 'MSEP')
+```
+```{r}
+#performing PCR on the training data set
+#based off of PCR on the whole data set, we will use M=33
+pcr_fit_train <- pcr(stay ~ ., data = hos_train2, scale = TRUE,
+                     validation = "CV")
+summary(pcr_fit_train)
+validationplot(pcr_fit_train, val.type = 'MSEP')
+```
+from the graph, the lowest cross-validation error occurs at M = 33, without having to use all the components which have very little difference from using all components
+```{r}
+pcr_pred <- predict(pcr_fit_train, hos_test2, ncomp = 33)
+pcr_MSE <- mean((pcr_pred - hos_test2$stay)^2)
+print(pcr_MSE)
+```
+The test MSE for Principal Component Regression is 0.4194666
+
+I want to compare this regression to the partial least squares using the same method.
+```{r}
+#Partial Least Squares
+pls_comp_fit <- plsr(stay ~ ., data = hospital2,
+                     scale = TRUE, validation = "CV")
+summary(pls_comp_fit)
+validationplot(pls_comp_fit, val.type = "MSEP")
+```
+```{r}
+#finding the MSE of PLS
+pls_comp_pred <- predict(pls_comp_fit, hos_test2, ncomp = 1)
+pls_comp_MSE <- mean((pls_comp_pred - hos_test2$stay)^2)
+print(pls_comp_MSE)
+```
+Comparing the PLS model and PCR model for this data set, we can see that the PCR model fits better with a lower test MSE than the PLS model.
+
+```{r}
+#Comparing the Test MSE for Quantitative problem
+par(mfrow = c(1,2))
+barplot(c(lin_MSE, ridge_MSE, lasso_MSE, pls_MSE, reg_tree_MSE),
+        names.arg = c("OLS", "Ridge", "Lasso", "PLS", "Reg_Tree"),
+        ylab = "Mean Squared Error", col = "blue")
+barplot(c(prune_tree_MSE, bag_hos_MSE, rf_MSE, boost_MSE),
+        names.arg = c("Pruned_Reg_Tree", "Bagging", "RandomForest", "Boosting"),
+        ylab = "Mean Squared Error", col = "blue")
+Quant_MSE <- data.frame(Model_MSE = c(lin_MSE, ridge_MSE, lasso_MSE, pls_MSE, reg_tree_MSE,
+               prune_tree_MSE, bag_hos_MSE, rf_MSE, boost_MSE))
+min(Quant_MSE)
+```
+Comparing the MSE of models that qualified for this comparison showed that Multiple linear regression is the best model used for this data set. Partial least Squares is a close second in this list. I will used both of these models to predict the number of days a patient will stay in a hospital.
+```{r}
+#Predicting the average amount of days a patient will stay in a hospital.
+mean(lin_pred)
+mean(pls.pred)
+#Both models give you about 0.8344 so if we times that with 20(for the range of days for the factor 0), we should be able to predict the average amount of days a patient would stay in the hospital.
+avg_stay <- 0.8344*20
+print(avg_stay)
+#A patient will stay on average 16.688 days in a hospital.
+```
+```{r}
+#Comparing the MSE for Qualitative Problem
+#The same concept will apply to the quantitative problem, I will only use models that I've gotten the MSE from.
+barplot(c(lda_MSE,qda_MSE,class_tree_MSE),
+        names.arg = c("lda_MSE", "qda_MSE","class_tree_MSE"),
+        ylab = "Mean Squared Error", col = "red")
+Qual_MSE <- data.frame(Model_MSE = c(lda_MSE,qda_MSE,class_tree_MSE))
+min(Qual_MSE)
+```
+The lowest MSE in the qualified models used for our qualitative problem is the qda model, but the lda model is also really close so we will use both models to help without prediction.
+```{r}
+#Predicting Qualitative problem
+lda_pred_num <- as.numeric(lda_pred$class)
+qda_pred2_num <- as.numeric(qda_pred2$class)
+mean(qda_pred2_num)
+mean(lda_pred_num)
+#From the data set extreme = 1, minor = 2, and moderate = 3.
+#A average patient at a hospital will have a moderate severity in illness.
+```
+```{r}
+#Predicting PCR problem
+mean(pcr_pred)
+#if we do the same math as we did for the quantitative problem would be able to get the average days a patient will stay in the hospital.
+pcr_avg_stay <- 0.834*20
+print(pcr_avg_stay)
+#A patient will stay on average 16.68 days in a hospital.
+```
