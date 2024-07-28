@@ -1,0 +1,168 @@
+---
+title: "Segmentation and Profiling Project NT"
+author: "Nelson Tran"
+date: "2024-04-27"
+output: word_document
+---
+
+```{r}
+customer_data <- read.csv("./Customer_Dataset_Data.csv",
+                          na.strings = "NA",
+                          stringsAsFactors = FALSE)
+customer_data <- customer_data[-c(1)]
+```
+
+```{r}
+library(tidytuesdayR)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+```
+
+Using "TotalDebt" as our rule-based segmentation
+```{r}
+quantiles <- quantile(customer_data$totaldebt, probs = c(0.25, 0.5, 0.75))
+
+#creating low, medium, and high debt.
+customer_data <- customer_data %>%
+  mutate(Total_Debt_Segment = case_when(
+    totaldebt < quantiles[2] ~ "low_debt",
+    totaldebt >= quantiles[2] & totaldebt < quantiles [3] ~ "med_debt",
+    totaldebt >= quantiles[3] ~ "high_debt"
+  ))
+
+#I want to segment this more by the tenure of the customer but there is not data indicating this, I want to calculate total debt and the data set only has credit card tenure.
+
+#segmenting by NewsSubscriber or not.
+#This will help if a customer is engaged or not
+customer_data <- customer_data %>%
+  mutate(Value_Customers = case_when(
+    Total_Debt_Segment == "low_debt" & NewsSubscriber == "Yes" ~ "high_value",
+    Total_Debt_Segment == "low_debt" & NewsSubscriber == "No" ~ "med_value",
+    Total_Debt_Segment == "med_debt" & NewsSubscriber == "Yes" ~ "high_value",
+    Total_Debt_Segment == "med_debt" & NewsSubscriber == "No" ~ "med_value",
+    Total_Debt_Segment == "high_debt" & NewsSubscriber == "Yes" ~ "med_value",
+    Total_Debt_Segment == "high_debt" & NewsSubscriber == "No" ~ "low_value",
+  ))
+
+#Checking to see if a customer had defaulted on a loan or not to see if they could take on more debt or make payments
+customer_data <- customer_data %>%
+  mutate(Value_Customers_def = case_when(
+    Value_Customers == "high_value" & LoanDefault == "Yes" ~ "high_value_def",
+    Value_Customers == "high_value" & LoanDefault == "No" ~ "high_value",
+    Value_Customers == "med_value" & LoanDefault == "Yes" ~ "med_value_def",
+    Value_Customers == "med_value" & LoanDefault == "No" ~ "med_value",
+    Value_Customers == "low_value" & LoanDefault == "Yes" ~ "low_value_def",
+    Value_Customers == "low_value" & LoanDefault == "No" ~ "low_value_",
+  ))
+
+customer_data %>% add_count(Value_Customers_def) %>%
+  group_by(Value_Customers_def,n) %>%
+  summarise_all("mean")
+
+print(quantiles)
+table(customer_data$Value_Customers)
+table(customer_data$Value_Customers_def)
+
+customer_data <- write.csv("Ruled_Based_Segmentation.csv")
+```
+Unsupervised Learning for "TotalDebt"
+```{r}
+df <- read.csv("./Customer_Dataset_Data_OG.csv")
+
+df$totaldebt <- customer_data$totaldebt
+
+df$Votes <- ifelse(df$Votes=="Yes",1,0)
+df$UnionMember <- ifelse(df$UnionMember=="Yes",1,0)
+df$Gender = ifelse(df$Gender=="female",1,0)
+df$JobCategory <- as.numeric(as.factor(df$JobCategory))
+df$Retired <- ifelse(df$Retired=="Yes",1,0)
+df$LoanDefault <- ifelse(df$LoanDefault=="Yes",1,0)
+df$MaritalStatus <- ifelse(df$MaritalStatus=="Married",1,0)
+df$CarOwnership <- ifelse(df$CarOwnership=="Own",1,0)
+df$CarBrand <- ifelse(df$CarBrand=="Domestic",1,0)
+df$PoliticalPartyMem <- ifelse(df$PoliticalPartyMem=="Yes",1,0)
+df$CreditCard <- as.numeric(as.factor(df$CreditCard))
+df$ActiveLifestyle <- ifelse(df$ActiveLifestyle=="Yes",1,0)
+df$EquipmentRental <- ifelse(df$EquipmentRental=="Yes",1,0)
+df$CallingCard <- ifelse(df$CallingCard=="Yes",1,0)
+df$WirelessData <- ifelse(df$WirelessData=="Yes",1,0)
+
+df <- df[, -c(1, 4, 15, 46, 47, 48, 49, 50, 51, 52, 53,
+              54, 56, 57, 58, 59, 60)]
+
+df <- df %>% mutate(HHIncome = parse_number(HHIncome))
+df <- df %>% mutate(CarValue = parse_number(CarValue))
+df$CommuteTime <- as.numeric(df$CommuteTime)
+df <- df %>% mutate(CardSpendMonth = parse_number(CardSpendMonth))
+df <- df %>% mutate(VoiceLastMonth = parse_number(VoiceLastMonth))
+df <- df %>% mutate(VoiceOverTenure = parse_number(VoiceOverTenure))
+df <- df %>% mutate(EquipmentLastMonth = parse_number(EquipmentLastMonth))
+df <- df %>% mutate(EquipmentOverTenure = parse_number(EquipmentOverTenure))
+df <- df %>% mutate(DataLastMonth = parse_number(DataLastMonth))
+df <- df %>% mutate(DataOverTenure = parse_number(DataOverTenure))
+df[is.na(df)] <- 0
+df$TownSize <- as.numeric(df$TownSize)
+```
+
+```{r}
+df <- na.omit(df)
+summary(df)
+```
+
+```{r}
+#Normalizing each columning using scale function
+df_scaled <- scale(df)
+df_scaled <- as.data.frame(df_scaled)
+```
+
+```{r}
+#setting code for reproducibility
+set.seed(123)
+num_clusters <- 6
+kclust <- kmeans(df_scaled, centers = num_clusters)
+
+#add segments to original dataset
+df_scaled$kmeans_segment <- as.factor(kclust$cluster)
+```
+
+Choosing a good number of clusters
+```{r}
+ks <- 1:12
+tot_within_ss <- sapply(ks, function(k) {
+    set.seed(1223)
+    cl <- kmeans(df_scaled, k)
+    cl$tot.withinss
+})
+plot(ks, tot_within_ss, type = "b")
+```
+I think that 5 is a good number of clusters as there is minimal improvements when increasing the number of clusters.
+```{r}
+set.seed(1223)
+NUM_CLUSTERS <- 5
+kclust <- kmeans(df_scaled, centers = NUM_CLUSTERS, nstart=10)
+
+#add segments to original data set
+df$kmeans_segment <- as.factor(kclust$cluster)
+```
+
+Segment Profiles
+```{r}
+df %>% add_count(kmeans_segment) %>%
+  group_by(kmeans_segment,n) %>% 
+  summarise_all("mean")
+```
+
+```{r}
+g <- ggplot(df)+
+  geom_point(aes(x=Age,y=totaldebt,colour=kmeans_segment))+
+  scale_y_continuous(trans='log10')
+print(g)
+```
+
+
+
+```{r}
+write.csv(customer_data, file = "data_ruled_based.csv")
+write.csv(df, file = "data_unsupervised.csv")
+```
